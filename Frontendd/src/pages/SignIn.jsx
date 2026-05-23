@@ -1,9 +1,9 @@
-import toast from "react-hot-toast";
 import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Eye, EyeOff } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import toast from "react-hot-toast";
 
 import { API_BASE_URL } from "../config";
 
@@ -21,23 +21,35 @@ export default function SignIn() {
         e.preventDefault();
         setIsLoading(true);
 
+        const loadingToast = toast.loading("Signing in...");
+
         try {
             const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password })
             });
+
             const data = await res.json();
 
             if (res.ok) {
                 login(data.token, data.user);
+
+                toast.success("Login successful!", {
+                    id: loadingToast,
+                });
+
                 navigate('/');
             } else {
-                toast.error(data.message || 'Login failed');
+                toast.error(data.message || 'Login failed', {
+                    id: loadingToast,
+                });
             }
         } catch (error) {
             console.error("Login error", error);
-            toast.error("Something went wrong");
+            toast.error("Something went wrong", {
+                id: loadingToast,
+            });
         } finally {
             setIsLoading(false);
         }
@@ -65,6 +77,13 @@ export default function SignIn() {
                             backgroundSize: '24px 24px'
                         }}
                     >
+                      {/* Close Button */}
+                        <button
+                           onClick={() => navigate(-1)}
+                           className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-zinc-800 hover:bg-zinc-700 text-gray-400 hover:text-white transition-all duration-200 z-20"
+                           type="button">
+                           ✕
+                        </button>
                         {/* Title */}
                         <div className="text-center mb-10 relative z-10">
                             <h1 className="text-3xl font-bold text-gray-900 tracking-tight">
@@ -117,7 +136,7 @@ export default function SignIn() {
                                         )}
                                     </button>
                                 </div>
-                                {/* Forgot Password Link - Moved BELOW input */}
+                                {/* Forgot Password Link */}
                                 <div className="flex justify-end pt-1">
                                     <Link
                                         to="/forgot-password"
@@ -144,9 +163,6 @@ export default function SignIn() {
                                 )}
                             </button>
                         </form>
-
-                        {/* Divider */}
-
 
                         {/* Sign Up Link */}
                         <div className="mt-8 text-center text-sm relative z-10">

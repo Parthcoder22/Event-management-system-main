@@ -1,13 +1,17 @@
-import toast from "react-hot-toast";
 import React, { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { Eye, EyeOff } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
+import toast from "react-hot-toast";
 import { LegalModal } from "../components/ui/legal-modal";
 import { legalContent } from "../data/legalContent";
 
 import { API_BASE_URL } from "../config";
+
+// ── Reusable error message component ─────────────────────────────────────
+const ErrorMsg = ({ msg }) =>
+    msg ? <p className="text-red-500 text-xs mt-1">{msg}</p> : null;
 
 export default function SignUp() {
     const [isVisible, setIsVisible] = useState(false);
@@ -20,7 +24,7 @@ export default function SignUp() {
         email: '',
         password: '',
         confirmPassword: '',
-        role: 'customer'
+        role: 'attendee'
     });
 
     // ── Validation errors state ──────────────────────────────────────────────
@@ -87,15 +91,16 @@ export default function SignUp() {
         }
 
         if (formData.password !== formData.confirmPassword) {
-toast.error("Passwords do not match");
-setErrors(prev => ({
-  ...prev,
-  confirmPassword: "Passwords do not match"
-}));
+            toast.error("Passwords do not match");
+            setErrors(prev => ({
+                ...prev,
+                confirmPassword: "Passwords do not match"
+            }));
             return;
         }
 
         setIsLoading(true);
+        const loadingToast = toast.loading("Creating account...");
 
         try {
             const payload = {
@@ -110,29 +115,40 @@ setErrors(prev => ({
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
+
             const data = await res.json();
 
             if (res.ok) {
                 login(data.token, data.user);
+
+                toast.success("Account created successfully!", {
+                    id: loadingToast,
+                });
+
                 switch (data.user.role) {
-                    case 'admin': navigate('/admin/dashboard'); break;
-                    case 'organizer': navigate('/organizer/dashboard'); break;
-                    default: navigate('/customer/dashboard');
+                    case 'admin':
+                        navigate('/admin/dashboard');
+                        break;
+                    case 'organizer':
+                        navigate('/organizer/dashboard');
+                        break;
+                    default:
+                        navigate('/customer/dashboard');
                 }
             } else {
-                toast.error(data.message || 'Signup failed');
+                toast.error(data.message || 'Signup failed', {
+                    id: loadingToast,
+                });
             }
         } catch (error) {
             console.error("Signup error", error);
-            toast.error("Something went wrong");
+            toast.error("Something went wrong", {
+                id: loadingToast,
+            });
         } finally {
             setIsLoading(false);
         }
     };
-
-    // ── Reusable error message component ─────────────────────────────────────
-    const ErrorMsg = ({ msg }) =>
-        msg ? <p className="text-red-500 text-xs mt-1">{msg}</p> : null;
 
     return (
         <div className="min-h-screen flex flex-col bg-background relative overflow-hidden">
@@ -156,6 +172,15 @@ setErrors(prev => ({
                             backgroundSize: '24px 24px'
                         }}
                     >
+                        {/* Close Button */}
+                        <button
+                           onClick={() => navigate(-1)}
+                           className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-zinc-800 hover:bg-zinc-700 text-gray-400 hover:text-white transition-all duration-200 z-20"
+                           type="button">
+                            ✕
+                        </button>
+
+                        
                         {/* Title */}
                         <div className="text-center mb-10 relative z-10">
                             <h1 className="text-3xl font-bold text-gray-900 tracking-tight">

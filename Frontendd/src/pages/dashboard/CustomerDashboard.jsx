@@ -1,81 +1,228 @@
+"use client";
+
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import toast from "react-hot-toast";
-import React, { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Calendar, MapPin, Ticket, X, Download } from 'lucide-react';
+import { Calendar, MapPin, Ticket, X, Download, Search } from 'lucide-react';
+import { io } from 'socket.io-client';
 import { Button } from '../../components/ui/button';
 import { useAuth } from '../../context/AuthContext';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { API_BASE_URL } from '../../config';
-import ConfirmationModal from "../../components/ui/confirmation-modal";
-
+import ConfirmationModal from '../../components/ui/confirmation-modal';
+import { useDebounce } from '../../hooks/useDebounce';
 import { generateCertificate } from '../../utils/generateCertificate';
 import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 
+const CATEGORIES = ['Tech', 'Sports', 'Cultural', 'Workshop', 'Music', 'Other'];
+
 export default function CustomerDashboard() {
     const { user } = useAuth();
+    const navigate = useNavigate();
+
+    const [searchParams, setSearchParams] = useSearchParams();
+
+    // Data States
     const [registrations, setRegistrations] = useState([]);
+    const [availableEvents, setAvailableEvents] = useState([]);
+    const [refundInfo, setRefundInfo] = useState(null);
+
+    // UI States
     const [loading, setLoading] = useState(true);
+    const [isFetching, setIsFetching] = useState(false);
     const [activeTab, setActiveTab] = useState('Upcoming Tickets');
     const [selectedTicket, setSelectedTicket] = useState(null);
-    const ticketRef = useRef(null);
-    const navigate = useNavigate();
-    const [searchParams] = useSearchParams();
-
-    const [availableEvents, setAvailableEvents] = useState([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [selectedRegistrationId, setSelectedRegistrationId] = useState(null);
+    const [highlightedEvents, setHighlightedEvents] = useState({});
 
+    // Filter States
+    const [searchQuery, setSearchQuery] = useState(() => searchParams.get('q') || '');
+    const [selectedCategory, setSelectedCategory] = useState(() => searchParams.get('category') || '');
+    const debouncedSearch = useDebounce(searchQuery, 400);
+
+    // Refs
+    const ticketRef = useRef(null);
+    const mountedRef = useRef(true);
+    const socketRef = useRef(null);
+    const joinedEventIdsRef = useRef([]);
+    const highlightTimeoutsRef = useRef({});
+
+    // Cleanup on unmount
     useEffect(() => {
-        if (activeTab === 'Browse Events') {
-            fetchAvailableEvents();
-        } else {
-            fetchRegistrations();
-        }
-    }, [activeTab, searchParams]);
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+            Object.values(highlightTimeoutsRef.current).forEach((timeoutId) => {
+                clearTimeout(timeoutId);
+            });
+            highlightTimeoutsRef.current = {};
+        };
+    }, []);
 
-    const fetchAvailableEvents = async () => {
-        const tags = searchParams.get('tags');
-        try {
-            setLoading(true);
-            let url = `${API_BASE_URL}/api/events?status=approved`;
-
-            if (tags) {
-                url += `&tags=${tags}`;
-            }
-
-    const res = await fetch(url);
-            if (res.ok) {
-                const data = await res.json();
-                // Filter events that are in the future
-                const upcoming = (data.events || []).filter(evt => new Date(evt.date) >= new Date());
-                setAvailableEvents(upcoming);
-            }
-        } catch (error) {
-            console.error("Failed to fetch events", error);
-        } finally {
-            setLoading(false);
+    const handleTabChange = (tab) => {
+        setActiveTab(tab);
+        if (tab === 'Browse Events') {
+            setSearchQuery(searchParams.get('q') || '');
+            setSelectedCategory(searchParams.get('category') || '');
         }
     };
 
-    const fetchRegistrations = async () => {
+    // Sync Search Params
+    useEffect(() => {
+        if (activeTab !== 'Browse Events') return;
+
+        const next = new URLSearchParams(searchParams);
+
+        if (debouncedSearch.trim()) {
+            next.set('q', debouncedSearch.trim());
+        } else {
+            next.delete('q');
+        }
+
+        if (selectedCategory) {
+            next.set('category', selectedCategory);
+        } else {
+            next.delete('category');
+        }
+
+        next.delete('page');
+
+        if (next.toString() !== searchParams.toString()) {
+            setSearchParams(next, { replace: true });
+        }
+    }, [activeTab, debouncedSearch, searchParams, selectedCategory, setSearchParams]);
+
+    // Fetch Events for "Browse Events" tab
+    const fetchAvailableEvents = useCallback(async () => {
         try {
-            setLoading(true);
+            setIsFetching(true);
+            const params = new URLSearchParams();
+            params.set('status', 'approved');
+            params.set('page', searchParams.get('page') || '1');
+            params.set('limit', '12');
+
+            const q = searchParams.get('q');
+            const category = searchParams.get('category');
+
+            if (q) params.set('q', q);
+            if (category) params.set('category', category);
+
+            const url = `${API_BASE_URL}/api/events?${params.toString()}`;
+            const res = await fetch(url);
+
+            if (!res.ok) throw new Error('Failed to fetch events');
+
+            const data = await res.json();
+            const upcoming = (data.events || []).filter((evt) => new Date(evt.date) >= new Date());
+
+            if (mountedRef.current) {
+                setAvailableEvents(upcoming);
+            }
+        } catch (error) {
+            console.error('Failed to fetch events:', error);
+        } finally {
+            if (mountedRef.current) {
+                setIsFetching(false);
+                setLoading(false);
+            }
+        }
+    }, [searchParams]);
+
+    // Fetch My Registrations
+    const fetchRegistrations = useCallback(async () => {
+        try {
+            if (mountedRef.current) setLoading(true);
             const token = localStorage.getItem('token');
             const res = await fetch(`${API_BASE_URL}/api/registrations/me`, {
-                headers: { Authorization: `Bearer ${token}` }
+                headers: { Authorization: `Bearer ${token}` },
             });
-            if (res.ok) {
+
+            if (res.ok && mountedRef.current) {
                 const data = await res.json();
                 setRegistrations(data.registrations || []);
             }
         } catch (error) {
-            console.error("Failed to fetch registrations", error);
+            console.error('Failed to fetch registrations', error);
         } finally {
-            setLoading(false);
+            if (mountedRef.current) setLoading(false);
         }
-    };
+    }, []);
 
+    // Initial Data Load
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            if (activeTab === 'Browse Events') {
+                void fetchAvailableEvents();
+            } else {
+                void fetchRegistrations();
+            }
+        }, 0);
+
+        return () => clearTimeout(timer);
+    }, [activeTab, fetchAvailableEvents, fetchRegistrations]);
+
+    // Socket Setup for live registration counts
+    useEffect(() => {
+        if (activeTab !== 'Browse Events' || availableEvents.length === 0) return;
+
+        const socket = io(API_BASE_URL, {
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+        });
+
+        socketRef.current = socket;
+        const eventIds = availableEvents.map((evt) => evt?._id).filter(Boolean);
+        joinedEventIdsRef.current = eventIds;
+
+        const pulseEvent = (eventId) => {
+            setHighlightedEvents((prev) => ({ ...prev, [eventId]: true }));
+            if (highlightTimeoutsRef.current[eventId]) clearTimeout(highlightTimeoutsRef.current[eventId]);
+            highlightTimeoutsRef.current[eventId] = window.setTimeout(() => {
+                setHighlightedEvents((prev) => {
+                    const next = { ...prev };
+                    delete next[eventId];
+                    return next;
+                });
+                delete highlightTimeoutsRef.current[eventId];
+            }, 1800);
+        };
+
+        const joinRooms = () => {
+            eventIds.forEach((eventId) => socket.emit('event:join', { eventId }));
+        };
+
+        const handleRegistrationCount = ({ eventId, count } = {}) => {
+            if (!eventId || typeof count !== 'number') return;
+
+            setAvailableEvents((prev) => {
+                let changed = false;
+                const next = prev.map((evt) => {
+                    if (evt._id !== eventId || evt.registeredCount === count) return evt;
+                    changed = true;
+                    return { ...evt, registeredCount: count };
+                });
+                if (changed) pulseEvent(eventId);
+                return next;
+            });
+        };
+
+        socket.on('connect', joinRooms);
+        socket.on('registration:count', handleRegistrationCount);
+
+        if (socket.connected) joinRooms();
+
+        return () => {
+            joinedEventIdsRef.current.forEach((eventId) => socket.emit('event:leave', { eventId }));
+            socket.off('connect', joinRooms);
+            socket.off('registration:count', handleRegistrationCount);
+            socket.disconnect();
+            socketRef.current = null;
+        };
+    }, [activeTab, availableEvents]);
+
+    // Actions
     const handleRegister = async (eventId) => {
         try {
             const token = localStorage.getItem('token');
@@ -83,72 +230,72 @@ export default function CustomerDashboard() {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    Authorization: `Bearer ${token}`
-                }
+                    Authorization: `Bearer ${token}`,
+                },
             });
+
+            const data = await res.json();
 
             if (res.ok) {
                 toast.success('Successfully registered!');
-                // Refresh data
                 setActiveTab('Upcoming Tickets');
+                fetchRegistrations();
             } else {
-                const data = await res.json();
                 toast.error(data.message || 'Registration failed');
             }
         } catch (error) {
-            console.error("Registration failed", error);
+            console.error('Registration failed', error);
             toast.error('Something went wrong');
+        }
+    };
+
+    const fetchRefundPolicy = async (registrationId) => {
+        try {
+            const token = localStorage.getItem('token');
+            const res = await fetch(`${API_BASE_URL}/api/registrations/${registrationId}/refund-policy`, {
+                method: "GET",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                },
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.message || "Failed to fetch refund policy");
+            setRefundInfo(data);
+        } catch (error) {
+            console.error("Failed to fetch refund policy:", error);
+            setRefundInfo(null);
         }
     };
 
     const handleCancelRegistration = async () => {
         try {
             const token = localStorage.getItem('token');
-            const response = await fetch(
-                `${API_BASE_URL}/api/registrations/${selectedRegistrationId}/cancel`,
-                {
-                    method: "DELETE",
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                        "Content-Type": "application/json",
-                    },
+            const response = await fetch(`${API_BASE_URL}/api/registrations/${selectedRegistrationId}/cancel`, {
+                method: "DELETE",
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
                 }
-            );
+            });
 
             const data = await response.json();
 
-            if (!response.ok) {
-                throw new Error(
-                    data.message || "Failed to cancel registration"
-                );
-            }
+            if (!response.ok) throw new Error(data.message || "Failed to cancel registration");
 
-            
-
-            // Update UI instantly
             setRegistrations((prev) =>
-                prev.map((reg) =>
-                    reg._id === selectedRegistrationId
-                        ?
-                        // console.log(reg._id)
-                        {
-                            ...reg,
-                            status: "cancelled",
-                        }
-                        : reg
-                )
+                prev.map((reg) => reg._id === selectedRegistrationId ? { ...reg, status: 'cancelled' } : reg)
             );
 
             setIsModalOpen(false);
             setSelectedRegistrationId(null);
-            console.log("Cancelled")
-
+            setRefundInfo(null);
+            toast.success('Registration cancelled successfully!');
         } catch (error) {
             console.error(error);
-            alert('Something went wrong');
+            toast.error('Something went wrong');
         }
     };
-
 
     const handleDownloadTicket = async () => {
         try {
@@ -161,78 +308,42 @@ export default function CustomerDashboard() {
             });
 
             const imgData = canvas.toDataURL('image/png');
-
-            const pdf = new jsPDF({
-                orientation: 'portrait',
-                unit: 'mm',
-                format: 'a4',
-            });
+            const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
 
             const pdfWidth = pdf.internal.pageSize.getWidth();
-
             const imgProps = pdf.getImageProperties(imgData);
+            const pdfHeight = (imgProps.height * (pdfWidth - 20)) / imgProps.width;
 
-            const pdfHeight =
-                (imgProps.height * (pdfWidth - 20)) / imgProps.width;
-
-            // Branding
             pdf.setFontSize(20);
             pdf.setTextColor(244, 63, 94);
             pdf.text('EventOne Ticket', 15, 15);
 
-            // Ticket image
             const maxHeight = 250;
-
             let finalWidth = pdfWidth - 20;
             let finalHeight = pdfHeight;
 
             if (pdfHeight > maxHeight) {
                 const scaleFactor = maxHeight / pdfHeight;
-
                 finalHeight = maxHeight;
                 finalWidth = finalWidth * scaleFactor;
             }
 
-            pdf.addImage(
-                imgData,
-                'PNG',
-                10,
-                25,
-                finalWidth,
-                finalHeight
-            );
+            pdf.addImage(imgData, 'PNG', 10, 25, finalWidth, finalHeight);
 
-            const safeEventName = selectedTicket.event?.title
-                ?.replace(/\s+/g, '-')
-                ?.replace(/[^a-zA-Z0-9-_]/g, '')
-                ?.toUpperCase();
-
+            const safeEventName = selectedTicket.event?.title?.replace(/\s+/g, '-')?.replace(/[^a-zA-Z0-9-_]/g, '')?.toUpperCase();
             const fileName = `ticket-${safeEventName || 'EVENT'}-${selectedTicket._id.slice(-6).toUpperCase()}.pdf`;
-
             pdf.save(fileName);
         } catch (error) {
             console.error('PDF generation failed:', error);
+            toast.error("Failed to generate ticket PDF");
         }
     };
 
-    // Filter registrations based on date
-   const upcomingEvents = [];
+    // Filter Logic
+    const upcomingEvents = registrations.filter((reg) => reg.event && new Date(reg.event.date) >= new Date());
+    const pastEvents = registrations.filter((reg) => reg.event && reg.status !== 'cancelled' && new Date(reg.event.date) < new Date());
 
-const pastEvents = [
-  {
-    _id: "abc12345678",
-    status: "attended",
-    event: {
-      title: "AI Innovation Summit",
-      description: "A tech conference on AI and innovation.",
-      date: "2025-04-10",
-      location: "Mumbai",
-      category: "Technology",
-    },
-  },
-];
-
-    if (loading) {
+    if (loading && activeTab !== 'Browse Events') {
         return (
             <div className="flex items-center justify-center min-h-screen bg-[#09090b]">
                 <div className="w-8 h-8 border-2 border-rose-500 border-t-transparent rounded-full animate-spin" />
@@ -242,15 +353,13 @@ const pastEvents = [
 
     return (
         <div className="min-h-screen bg-background text-foreground pt-32 px-4 sm:px-6 lg:px-8 font-sans selection:bg-purple-500/30 relative overflow-hidden">
-            {/* Background gradient from Home/Hero */}
             <div className="absolute inset-0 z-0 pointer-events-none">
-                <div className="from-primary/20 via-background to-background absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))]"></div>
-                <div className="bg-primary/5 absolute top-0 left-1/2 -z-10 h-[1000px] w-[1000px] -translate-x-1/2 rounded-full blur-3xl"></div>
-                <div className="absolute inset-0 bg-[linear-gradient(to_right,#8882_1px,transparent_1px),linear-gradient(to_bottom,#8882_1px,transparent_1px)] bg-[size:16px_16px] opacity-15"></div>
+                <div className="from-primary/20 via-background to-background absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))]" />
+                <div className="bg-primary/5 absolute top-0 left-1/2 -z-10 h-[1000px] w-[1000px] -translate-x-1/2 rounded-full blur-3xl" />
+                <div className="absolute inset-0 bg-[linear-gradient(to_right,#8882_1px,transparent_1px),linear-gradient(to_bottom,#8882_1px,transparent_1px)] bg-[size:16px_16px] opacity-15" />
             </div>
 
             <div className="max-w-7xl mx-auto relative z-10">
-                {/* Header */}
                 <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-12">
                     <div>
                         <h1 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground">
@@ -267,17 +376,17 @@ const pastEvents = [
                     </div>
                 </div>
 
-                {/* Navigation Tabs */}
                 <div className="mb-8 border-b border-border">
                     <div className="flex space-x-8 overflow-x-auto no-scrollbar">
                         {['Upcoming Tickets', 'Past Events', 'Browse Events'].map((tab) => (
                             <button
                                 key={tab}
-                                onClick={() => setActiveTab(tab)}
-                                className={`pb-4 text-sm font-medium transition-colors relative whitespace-nowrap ${activeTab === tab
-                                    ? 'text-orange-500'
-                                    : 'text-muted-foreground hover:text-foreground'
-                                    }`}
+                                onClick={() => handleTabChange(tab)}
+                                className={`pb-4 text-sm font-medium transition-colors relative whitespace-nowrap ${
+                                    activeTab === tab
+                                        ? 'text-orange-500'
+                                        : 'text-muted-foreground hover:text-foreground'
+                                }`}
                             >
                                 {tab}
                                 {activeTab === tab && (
@@ -291,16 +400,18 @@ const pastEvents = [
                     </div>
                 </div>
 
-                {/* Main Content Area */}
                 <div className="bg-card/50 backdrop-blur-sm rounded-3xl p-6 md:p-8 min-h-[500px] border border-border shadow-sm">
-                    {/* Content Header based on Tab */}
                     <div className="flex justify-between items-center mb-8">
                         <h2 className="text-xl font-semibold text-foreground">
-                            {activeTab === 'Upcoming Tickets' ? 'Your Upcoming Tickets' : 'Event History'}
+                            {activeTab === 'Upcoming Tickets'
+                                ? 'Your Upcoming Tickets'
+                                : activeTab === 'Past Events'
+                                ? 'Event History'
+                                : 'Browse Events'}
                         </h2>
                         {activeTab === 'Upcoming Tickets' && (
                             <span className="px-3 py-1 bg-rose-500/10 text-rose-500 text-xs font-medium rounded-full border border-rose-500/20">
-                                {upcomingEvents.filter(event => event.status!="cancelled").length} Active
+                                {upcomingEvents.filter((event) => event.status !== 'cancelled').length} Active
                             </span>
                         )}
                         {activeTab === 'Past Events' && (
@@ -310,7 +421,6 @@ const pastEvents = [
                         )}
                     </div>
 
-                    {/* Content Body */}
                     <AnimatePresence mode="popLayout">
                         {activeTab === 'Upcoming Tickets' && (
                             <div className="space-y-6">
@@ -344,7 +454,6 @@ const pastEvents = [
                                                 className="group relative bg-card border border-border rounded-2xl p-4 hover:border-rose-500/50 transition-colors shadow-sm"
                                             >
                                                 <div className="flex flex-col md:flex-row gap-6">
-                                                    {/* Poster */}
                                                     <div className="w-full md:w-56 h-36 rounded-xl overflow-hidden shrink-0 bg-muted relative">
                                                         {reg.event?.posterUrl ? (
                                                             <img
@@ -362,33 +471,24 @@ const pastEvents = [
                                                             {reg.event?.category || 'Event'}
                                                         </span>
                                                     </div>
-
-                                                    {/* Details */}
                                                     <div className="flex-1 flex flex-col justify-between">
                                                         <div>
                                                             <div className="flex justify-between items-start">
-                                                                {/* Event title */}
                                                                 <h3 className="text-lg font-semibold text-foreground group-hover:text-rose-500 transition-colors">
                                                                     {reg.event?.title || 'Unknown Event'}
                                                                 </h3>
-                                                                {/* Event status */}
                                                                 <span
-                                                                    className={`inline-flex items-center text-xs px-2 py-1 rounded-full border ${reg.status === "attended"
-                                                                        ? "bg-purple-500/10 text-purple-500 border-purple-500/20"
-                                                                        : reg.status === "cancelled"
-                                                                            ? "bg-red-500/10 text-red-500 border-red-500/20"
-                                                                            : "bg-green-500/10 text-green-500 border-green-500/20"
-                                                                        }`}
+                                                                    className={`inline-flex items-center text-xs px-2 py-1 rounded-full border ${
+                                                                        reg.status === 'attended'
+                                                                            ? 'bg-purple-500/10 text-purple-500 border-purple-500/20'
+                                                                            : reg.status === 'cancelled'
+                                                                            ? 'bg-red-500/10 text-red-500 border-red-500/20'
+                                                                            : 'bg-green-500/10 text-green-500 border-green-500/20'
+                                                                    }`}
                                                                 >
-                                                                    {reg.status === "attended"
-                                                                        ? "Attended"
-                                                                        : reg.status === "cancelled"
-                                                                            ? "Cancelled"
-                                                                            : "Confirmed"}
+                                                                    {reg.status === 'attended' ? 'Attended' : reg.status === 'cancelled' ? 'Cancelled' : 'Confirmed'}
                                                                 </span>
                                                             </div>
-
-                                                            {/* Event description */}
                                                             <p className="text-muted-foreground text-sm mt-2 line-clamp-2 max-w-2xl">
                                                                 {reg.event?.description}
                                                             </p>
@@ -407,53 +507,35 @@ const pastEvents = [
                                                                 </span>
                                                             </div>
                                                         </div>
-                                                        {evt.tags?.length > 0 && (
-                                                            <div className="flex flex-wrap gap-2 mt-3">
-                                                                {evt.tags.map((tag) => (
-                                                                    <button
-                                                                        key={tag}
-                                                                        type="button"
-                                                                        onClick={() => navigate(`?tags=${tag}`)}
-                                                                        className="text-xs bg-rose-500/10 text-rose-500 px-2 py-1 rounded-full hover:bg-rose-500/20 transition"
-                                                                    >
-                                                                        #{tag}
-                                                                    </button>
-                                                                ))}
-                                                            </div>
-                                                        )}
-
                                                         <div className="flex justify-between pt-4 md:pt-0 gap-2">
-
-
-                                                            {/* Cancel Registration */}
-                                                            {
-                                                                reg.status === "cancelled" ? (
-                                                                    null
-                                                                ) : (
-                                                                    <>
-                                                                        <Button
-                                                                            variant="outline"
-                                                                            className="text-xs h-8 border-rose-500/30 text-rose-500 hover:bg-rose-500/10"
-                                                                            onClick={() => setSelectedTicket(reg)}
-                                                                        >
-                                                                            View Details
-                                                                        </Button>
-                                                                        <Button
-                                                                            variant="outline"
-                                                                            className="text-xs h-8 bg-rose-600 border-rose-500/30 text-white hover:bg-red-400"
-                                                                            onClick={() => {
-                                                                                setSelectedRegistrationId(
-                                                                                    reg._id
-                                                                                );
-                                                                                setIsModalOpen(true);
-                                                                            }}
-                                                                        >
-                                                                            Cancel Registration
-                                                                        </Button>
-                                                                    </>
-
-                                                                )
-                                                            }
+                                                            {reg.status === 'cancelled' ? (
+                                                                reg.refundStatus === "pending" ? (
+                                                                    <p className='text-sm text-yellow-500 font-bold'>Refund of ₹{reg.refundAmount} initiated (5-7 business days)</p>
+                                                                ) : reg.refundStatus === "processed" ? (
+                                                                    <p className='text-sm text-green-500 font-bold'>Refunded ₹{reg.refundAmount}</p>
+                                                                ) : null
+                                                            ) : (
+                                                                <>
+                                                                    <Button
+                                                                        variant="outline"
+                                                                        className="text-xs h-8 border-rose-500/30 text-rose-500 hover:bg-rose-500/10"
+                                                                        onClick={() => setSelectedTicket(reg)}
+                                                                    >
+                                                                        View Details
+                                                                    </Button>
+                                                                    <Button
+                                                                        variant="outline"
+                                                                        className="text-xs h-8 bg-rose-600 border-rose-500/30 text-white hover:bg-red-400"
+                                                                        onClick={async () => {
+                                                                            setSelectedRegistrationId(reg._id);
+                                                                            await fetchRefundPolicy(reg._id);
+                                                                            setIsModalOpen(true);
+                                                                        }}
+                                                                    >
+                                                                        Cancel Registration
+                                                                    </Button>
+                                                                </>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 </div>
@@ -495,62 +577,45 @@ const pastEvents = [
                                                 <div className="flex flex-col md:flex-row gap-6">
                                                     <div className="w-full md:w-40 h-24 rounded-xl overflow-hidden shrink-0 bg-muted grayscale group-hover:grayscale-0 transition-all">
                                                         {reg.event?.posterUrl ? (
-                                                            <img
-                                                                src={reg.event.posterUrl}
-                                                                alt={reg.event.title}
-                                                                className="w-full h-full object-cover"
-                                                            />
+                                                            <img src={reg.event.posterUrl} alt={reg.event.title} className="w-full h-full object-cover" />
                                                         ) : (
                                                             <div className="flex items-center justify-center h-full text-muted-foreground">
                                                                 <Calendar className="w-6 h-6" />
                                                             </div>
                                                         )}
                                                     </div>
-
-                                                    
-                                                        <div className="flex-1 flex flex-col justify-center">
-    <div className="flex justify-between items-start">
-        <h3 className="text-base font-semibold text-foreground">
-            {reg.event?.title}
-        </h3>
-
-        <span className={`inline-flex items-center text-xs px-2 py-1 rounded-full border ${
-            reg.status === 'attended'
-                ? 'bg-purple-500/10 text-purple-500 border-purple-500/20'
-                : 'bg-secondary text-muted-foreground'
-        }`}>
-            {reg.status === 'attended' ? 'Attended' : 'Completed'}
-        </span>
-    </div>
-
-    <p className="text-muted-foreground text-xs mt-1">
-        {reg.event?.date
-            ? new Date(reg.event.date).toLocaleDateString()
-            : 'TBA'} • {reg.event?.location}
-    </p>
-
-    {reg.status === 'attended' && (
-        <div className="mt-4">
-            <Button
-                onClick={() =>
-                    generateCertificate({
-                        attendeeName: user?.name || 'Participant',
-                        eventTitle: reg.event?.title || 'Event',
-                        eventDate: reg.event?.date
-                            ? new Date(reg.event.date).toLocaleDateString()
-                            : 'TBA',
-                        organizerName: 'eventOne',
-                        registrationId: reg._id,
-                    })
-                }
-                className="bg-green-600 hover:bg-green-700 text-white text-xs h-8"
-            >
-                <Download className="w-3 h-3 mr-2" />
-                Download Certificate
-            </Button>
-        </div>
-    )}
-</div>
+                                                    <div className="flex-1 flex flex-col justify-center">
+                                                        <div className="flex justify-between items-start">
+                                                            <h3 className="text-base font-semibold text-foreground">{reg.event?.title}</h3>
+                                                            <span className={`inline-flex items-center text-xs px-2 py-1 rounded-full border ${
+                                                                reg.status === 'attended' ? 'bg-purple-500/10 text-purple-500 border-purple-500/20' : 'bg-secondary text-muted-foreground'
+                                                            }`}>
+                                                                {reg.status === 'attended' ? 'Attended' : 'Completed'}
+                                                            </span>
+                                                        </div>
+                                                        <p className="text-muted-foreground text-xs mt-1">
+                                                            {reg.event?.date ? new Date(reg.event.date).toLocaleDateString() : 'TBA'} • {reg.event?.location}
+                                                        </p>
+                                                        {reg.status === 'attended' && (
+                                                            <div className="mt-4">
+                                                                <Button
+                                                                    onClick={() =>
+                                                                        generateCertificate({
+                                                                            attendeeName: user?.name || 'Participant',
+                                                                            eventTitle: reg.event?.title || 'Event',
+                                                                            eventDate: reg.event?.date ? new Date(reg.event.date).toLocaleDateString() : 'TBA',
+                                                                            organizerName: 'eventOne',
+                                                                            registrationId: reg._id,
+                                                                        })
+                                                                    }
+                                                                    className="bg-green-600 hover:bg-green-700 text-white text-xs h-8"
+                                                                >
+                                                                    <Download className="w-3 h-3 mr-2" />
+                                                                    Download Certificate
+                                                                </Button>
+                                                            </div>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             </motion.div>
                                         ))}
@@ -561,7 +626,57 @@ const pastEvents = [
 
                         {activeTab === 'Browse Events' && (
                             <div className="space-y-6">
-                                {availableEvents.length === 0 ? (
+                                <div className="relative">
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                    <input
+                                        type="text"
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        placeholder="Search events by title or description..."
+                                        className="w-full pl-9 pr-9 py-2 rounded-xl bg-muted/50 border border-border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-rose-500 transition"
+                                    />
+                                    {searchQuery && (
+                                        <button
+                                            onClick={() => setSearchQuery('')}
+                                            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition"
+                                        >
+                                            <X className="w-4 h-4" />
+                                        </button>
+                                    )}
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                    <button
+                                        onClick={() => setSelectedCategory('')}
+                                        className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                                            selectedCategory === ''
+                                                ? 'bg-rose-500 text-white border-rose-500'
+                                                : 'bg-muted/50 text-muted-foreground border-border hover:border-rose-500/50'
+                                        }`}
+                                    >
+                                        All
+                                    </button>
+                                    {CATEGORIES.map((cat) => (
+                                        <button
+                                            key={cat}
+                                            onClick={() => setSelectedCategory(selectedCategory === cat ? '' : cat)}
+                                            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+                                                selectedCategory === cat
+                                                    ? 'bg-rose-500 text-white border-rose-500'
+                                                    : 'bg-muted/50 text-muted-foreground border-border hover:border-rose-500/50'
+                                            }`}
+                                        >
+                                            {cat}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                {isFetching && (
+                                    <div className="flex justify-center py-6">
+                                        <div className="w-6 h-6 border-2 border-rose-500 border-t-transparent rounded-full animate-spin" />
+                                    </div>
+                                )}
+
+                                {!isFetching && availableEvents.length === 0 && (
                                     <motion.div
                                         initial={{ opacity: 0 }}
                                         animate={{ opacity: 1 }}
@@ -570,36 +685,43 @@ const pastEvents = [
                                         <div className="w-16 h-16 bg-muted/50 rounded-full flex items-center justify-center mb-4">
                                             <Calendar className="w-8 h-8 text-muted-foreground" />
                                         </div>
-                                        <h3 className="text-lg font-medium text-foreground">No upcoming events found</h3>
-                                        <p className="text-muted-foreground mt-2 max-w-sm">
-                                            Check back later for new events!
+                                        <h3 className="text-lg font-medium text-foreground">No events found</h3>
+                                        <p className="text-muted-foreground mt-2 max-w-sm text-sm">
+                                            Try a different keyword or remove the category filter.
                                         </p>
                                     </motion.div>
-                                ) : (
+                                )}
+
+                                {!isFetching && availableEvents.length > 0 && (
                                     <div className="grid grid-cols-1 gap-6">
                                         {availableEvents.map((evt, idx) => {
-                                            const isRegistered = registrations.some(r => r.status==="registered" && r.event?._id === evt._id);
-                                            let isEventFullBooked = false;
-                                            if (evt.registeredCount === evt.capacity) {
-                                                isEventFullBooked = true;
-                                            }
+                                            const isRegistered = registrations.some((r) => r.status === 'registered' && r.event?._id === evt._id);
+                                            const registeredCount = evt.registeredCount ?? 0;
+                                            const isHighlighted = !!highlightedEvents[evt._id];
+                                            const isEventFullBooked = evt.registeredCount === evt.capacity;
+
                                             return (
                                                 <motion.div
                                                     key={evt._id}
                                                     layout
                                                     initial={{ opacity: 0, y: 10 }}
-                                                    animate={{ opacity: 1, y: 0 }}
+                                                    animate={{
+                                                        opacity: 1,
+                                                        y: 0,
+                                                        scale: isHighlighted ? [1, 1.01, 1] : 1,
+                                                        boxShadow: isHighlighted
+                                                            ? ['0 0 0 rgba(34, 197, 94, 0)', '0 0 0 1px rgba(34, 197, 94, 0.35), 0 0 28px rgba(34, 197, 94, 0.12)', '0 0 0 rgba(34, 197, 94, 0)']
+                                                            : '0 0 0 rgba(34, 197, 94, 0)',
+                                                    }}
                                                     transition={{ delay: idx * 0.05 }}
-                                                    className="group relative bg-card border border-border rounded-2xl p-4 hover:border-rose-500/50 transition-colors shadow-sm"
+                                                    className={`group relative bg-card border rounded-2xl p-4 transition-colors shadow-sm ${
+                                                        isHighlighted ? 'border-green-500/50' : 'border-border hover:border-rose-500/50'
+                                                    }`}
                                                 >
                                                     <div className="flex flex-col md:flex-row gap-6">
                                                         <div className="w-full md:w-56 h-36 rounded-xl overflow-hidden shrink-0 bg-muted relative">
                                                             {evt.posterUrl ? (
-                                                                <img
-                                                                    src={evt.posterUrl}
-                                                                    alt={evt.title}
-                                                                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                                                                />
+                                                                <img src={evt.posterUrl} alt={evt.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500" />
                                                             ) : (
                                                                 <div className="flex items-center justify-center h-full text-muted-foreground">
                                                                     <Calendar className="w-8 h-8" />
@@ -610,46 +732,34 @@ const pastEvents = [
                                                                 {evt.category}
                                                             </span>
                                                         </div>
-
                                                         <div className="flex-1 flex flex-col justify-between">
                                                             <div>
                                                                 <div className="flex justify-between items-start">
                                                                     <h3 className="text-lg font-semibold text-foreground group-hover:text-rose-500 transition-colors">
                                                                         {evt.title}
                                                                     </h3>
-                                                                    <span className="inline-flex items-center text-xs px-2 py-1 rounded-full border bg-blue-500/10 text-blue-500 border-blue-500/20">
-                                                                        {evt.capacity ? `${evt.capacity} Spots` : 'Open'}
+                                                                    <span className={`inline-flex items-center gap-2 text-xs px-2 py-1 rounded-full border transition-colors ${
+                                                                        isHighlighted ? 'bg-green-500/10 text-green-600 border-green-500/30' : 'bg-blue-500/10 text-blue-500 border-blue-500/20'
+                                                                    }`}>
+                                                                        <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                                                                        <span>
+                                                                            {registeredCount} registered{evt.capacity ? ` / ${evt.capacity}` : ''}
+                                                                        </span>
                                                                     </span>
                                                                 </div>
-                                                                <p className="text-muted-foreground text-sm mt-2 line-clamp-2 max-w-2xl">
-                                                                    {evt.description}
-                                                                </p>
+                                                                <p className="text-muted-foreground text-sm mt-2 line-clamp-2 max-w-2xl">{evt.description}</p>
                                                                 <div className="flex flex-wrap items-center gap-4 mt-3 text-xs text-muted-foreground">
-                                                                    <span className="flex items-center">
-                                                                        <Calendar className="w-3 h-3 mr-1.5" />
-                                                                        {new Date(evt.date).toLocaleDateString()}
-                                                                    </span>
-                                                                    <span className="flex items-center">
-                                                                        <MapPin className="w-3 h-3 mr-1.5" />
-                                                                        {evt.location}
-                                                                    </span>
+                                                                    <span className="flex items-center"><Calendar className="w-3 h-3 mr-1.5" />{new Date(evt.date).toLocaleDateString()}</span>
+                                                                    <span className="flex items-center"><MapPin className="w-3 h-3 mr-1.5" />{evt.location}</span>
                                                                 </div>
                                                             </div>
-
                                                             <div className="flex justify-end pt-4 md:pt-0">
                                                                 {isRegistered ? (
-                                                                    <Button disabled variant="success" className="text-xs h-8 bg-green-600 text-white opacity-75">
-                                                                        Registered
-                                                                    </Button>
+                                                                    <Button disabled variant="success" className="text-xs h-8 bg-green-600 text-white opacity-75">Registered</Button>
                                                                 ) : isEventFullBooked ? (
-                                                                    <Button disabled variant="secondary" className="text-xs h-8">
-                                                                        Fully Booked
-                                                                    </Button>
+                                                                    <Button disabled variant="secondary" className="text-xs h-8">Fully Booked</Button>
                                                                 ) : (
-                                                                    <Button
-                                                                        className="text-xs h-8 bg-rose-600 hover:bg-rose-700 text-white"
-                                                                        onClick={() => handleRegister(evt._id)}
-                                                                    >
+                                                                    <Button className="text-xs h-8 bg-rose-600 hover:bg-rose-700 text-white" onClick={() => handleRegister(evt._id)}>
                                                                         Register Now
                                                                     </Button>
                                                                 )}
@@ -667,7 +777,7 @@ const pastEvents = [
                 </div>
             </div>
 
-            {/* Ticket Details Modal */}
+            {/* View Ticket Modal */}
             <AnimatePresence>
                 {selectedTicket && (
                     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
@@ -677,26 +787,19 @@ const pastEvents = [
                             exit={{ opacity: 0, scale: 0.95 }}
                             className="bg-white text-zinc-950 w-full max-w-md rounded-2xl border border-zinc-200 shadow-2xl overflow-hidden relative"
                         >
-                            {/* Decorative Top */}
                             <div className="h-2 bg-gradient-to-r from-rose-500 to-orange-500" />
-
                             <button
                                 onClick={() => setSelectedTicket(null)}
                                 className="absolute top-4 right-4 text-zinc-400 hover:text-zinc-900 transition-colors p-1 hover:bg-zinc-100 rounded-full"
                             >
                                 <X className="w-5 h-5" />
                             </button>
-
                             <div className="p-6 bg-white">
                                 <div ref={ticketRef}>
                                     <div className="text-center mb-6">
-                                        <h3 className="text-xl font-bold mb-1 text-rose-600">
-                                            EventOne Ticket
-                                        </h3>
+                                        <h3 className="text-xl font-bold mb-1 text-rose-600">EventOne Ticket</h3>
                                         <p className="text-xs text-zinc-500 uppercase tracking-widest">Admit One</p>
                                     </div>
-
-                                    {/* Event Info */}
                                     <div className="space-y-4 mb-6">
                                         <div className="flex items-start gap-4 p-3 bg-zinc-50 border border-zinc-100 rounded-lg">
                                             <div className="h-16 w-16 rounded-md overflow-hidden bg-zinc-200 shrink-0">
@@ -716,7 +819,6 @@ const pastEvents = [
                                                 </p>
                                             </div>
                                         </div>
-
                                         <div className="grid grid-cols-2 gap-3 text-sm">
                                             <div className="p-3 bg-zinc-50 rounded-lg border border-zinc-200">
                                                 <span className="text-xs text-zinc-500 block mb-1">Attendee</span>
@@ -728,11 +830,8 @@ const pastEvents = [
                                             </div>
                                         </div>
                                     </div>
-
-                                    {/* QR Code Area */}
                                     <div className="flex flex-col items-center justify-center bg-white p-4 rounded-xl border border-dashed border-zinc-300 mb-6 relative">
                                         <div className="absolute top-0 left-0 w-full h-1 bg-[linear-gradient(to_right,transparent_50%,#000_50%)] bg-[size:10px_10px]" />
-
                                         {selectedTicket.qrCodeDataUrl ? (
                                             <img src={selectedTicket.qrCodeDataUrl} alt="Ticket QR Code" className="w-48 h-48 object-contain" />
                                         ) : (
@@ -758,13 +857,13 @@ const pastEvents = [
                 onClose={() => {
                     setIsModalOpen(false);
                     setSelectedRegistrationId(null);
+                    setRefundInfo(null);
                 }}
+                refundInfo={refundInfo}
                 onConfirm={handleCancelRegistration}
                 title="Cancel Registration"
                 message="Are you sure you want to cancel your registration? This action cannot be undone."
             />
         </div>
-
-
     );
 }

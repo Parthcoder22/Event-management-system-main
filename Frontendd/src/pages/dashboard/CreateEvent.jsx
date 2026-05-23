@@ -1,6 +1,5 @@
 import toast from "react-hot-toast";
 import React, { useState } from 'react';
-import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
@@ -18,6 +17,7 @@ import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Textarea } from '../../components/ui/textarea';
 import { API_BASE_URL } from '../../config';
+
 
 export default function CreateEvent() {
     const navigate = useNavigate();
@@ -75,63 +75,74 @@ export default function CreateEvent() {
             setTagInput('');
         }
     };
+    
+const removeTag = (tagToRemove) => {
+  setFormData({
+    ...formData,
+    tags: formData.tags.filter(
+      (tag) => tag !== tagToRemove
+    ),
+  });
+};
 
-    const removeTag = (tagToRemove) => {
-        setFormData({
-            ...formData,
-            tags: formData.tags.filter((tag) => tag !== tagToRemove),
-        });
-    };
+ const handleSubmit = async (e) => {
+    e.preventDefault();
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
+    setLoading(true);
 
-        setLoading(true);
+    const loadingToast = toast.loading("Creating event...");
 
-        try {
-            const data = new FormData();
+    try {
+        const data = new FormData();
 
-            const fullDate = new Date(
-                `${formData.date}T${formData.time}`
-            );
+        // Combine date and time
+        const fullDate = new Date(`${formData.date}T${formData.time}`);
 
-            data.append('title', formData.title);
-            data.append('description', formData.description);
-            data.append('date', fullDate.toISOString());
-            data.append('location', formData.location);
-            data.append('category', formData.category);
-            data.append('price', formData.price);
-            data.append('capacity', formData.capacity);
-            data.append('tags', JSON.stringify(formData.tags));
+        data.append('title', formData.title);
+        data.append('description', formData.description);
+        data.append('date', fullDate.toISOString());
+        data.append('location', formData.location);
+        data.append('category', formData.category);
+        data.append('price', formData.price);
+        data.append('capacity', formData.capacity);
 
-            if (formData.poster) {
-                data.append('poster', formData.poster);
-            }
-
-            const token = localStorage.getItem('token');
-
-            const res = await fetch(`${API_BASE_URL}/api/events`, {
-                method: 'POST',
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                },
-                body: data,
-            });
-
-            if (res.ok) {
-                navigate('/organizer/dashboard');
-            } else {
-                const err = await res.json();
-                toast.error(`Error: ${err.message}`);
-            }
-        } catch (error) {
-            console.error("Failed to create event", error);
-            toast.error("Something went wrong");
-
-        } finally {
-            setLoading(false);
+        if (formData.poster) {
+            data.append('poster', formData.poster);
         }
-    };
+
+        const token = localStorage.getItem('token');
+
+        const res = await fetch(`${API_BASE_URL}/api/events`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`
+            },
+            body: data
+        });
+
+        if (res.ok) {
+            toast.success("Event created successfully!", {
+                id: loadingToast,
+            });
+            navigate('/organizer/dashboard');
+            
+        } else {
+            const err = await res.json();
+            toast.error(err.message || "Failed to create event", {
+                id: loadingToast,
+            });
+        }
+        
+    } catch (error) {
+        console.error("Failed to create event", error);
+        toast.error("Something went wrong", {
+            id: loadingToast,
+        });
+        
+    } finally {
+        setLoading(false);
+    }
+};
 
     return (
         <div className="relative min-h-screen pt-24 px-4">
